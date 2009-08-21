@@ -1,0 +1,24 @@
+#!/usr/bin/ruby
+
+class String
+  def begins_with_Query?
+    str = "Query"; self[0..(str.size - 1)] == str
+  end
+end
+
+if STDIN.closed? or STDIN.eof?
+  STDERR.puts "#{__FILE__}: Nothing in STDIN"
+  exit(1)
+end
+
+last_query = ''
+while line = STDIN.gets
+  last_query = line if line.begins_with_Query?
+
+  if line =~ /domain/ and line =~ /E =/
+    puts last_query
+    puts line
+    puts
+    STDOUT.flush
+  end
+end

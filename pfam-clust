@@ -1,0 +1,199 @@
+#!/usr/bin/ruby
+
+##    pfam-clust - clusters of proteins with same sequence of Pfam domains
+##    Copyright (C) 2009  Aleksandr O. Levchuk
+##
+##    This program is free software: you can redistribute it and/or modify
+##    it under the terms of the GNU General Public License as published by
+##    the Free Software Foundation, either version 3 of the License, or
+##    (at your option) any later version.
+##
+##    This program is distributed in the hope that it will be useful,
+##    but WITHOUT ANY WARRANTY; without even the implied warranty of
+##    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+##    GNU General Public License for more details.
+##
+##    You should have received a copy of the GNU General Public License
+##    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+f = __FILE__; loop {break unless File.symlink?(f); f = File.readlink(f)}
+SRC_DIR  = File.dirname(File.expand_path(f))
+SRC_NAME = File.basename(__FILE__)
+
+FILTER_HMMPFAM = "#{SRC_DIR}/filter-hmmpfam"
+IDS_TO_FASTA   = "#{SRC_DIR}/ids-to-fasta"
+
+CAT = "/bin/cat"
+
+
+
+def load_parameters
+  fasta_files = []
+  pfam_file = nil
+
+  def usage
+    STDERR.puts %Q(
+Usage: #{SRC_NAME} <fastafile> [<fastafile>]... --pfams <pfamsfile>
+    )
+  end
+  
+  if ARGV.empty?
+    usage
+    exit
+  end
+  
+  if ARGV.select{|i| i == "--pfams"}.size != 1
+   STDERR.puts "ERROR: Wrong arguments. There must be one  \"--pfams\"."
+    usage
+    exit()
+  end
+  
+  if ARGV.include? "--pfams"
+    id = ARGV.index("--pfams")
+    pfam_file = ARGV[id + 1] 
+    ARGV.delete_at(id + 1)
+    ARGV.delete_at(id)
+  end
+ 
+  ARGV.each do |i|
+    if i =~ /^-/
+      STDERR.puts "WARNING: Unknown argument #{i}"
+    else
+      fasta_files.push(i)
+    end
+  end
+
+  return fasta_files, pfam_file 
+end
+
+
+def load_genes_with_pfams(filename)
+  return nil if filename.nil?
+
+  q, d, from, to = [nil, nil, nil, nil]
+  pfams = {}
+
+  IO.popen("#{CAT} #{filename} | #{FILTER_HMMPFAM}") do |f|
+    while line = f.gets
+      if line =~ /^ *Query sequence: (.*)/
+        ## Query sequence: Q8Z540
+        q = $1
+      elsif line =~ /(.*): domain .* from ([0-9]*) to ([0-9]*):/
+        ## PF00551.11: domain 1 of 1, from 184 to 361: score 72.5, E = 1.5e-18
+        next if q.nil?
+        d, from, to = [$1, $2.to_i, $3.to_i]
+        pfams[q] ||= []
+        pfams[q].push([d, from..to])
+      end
+    end
+  end
+
+  if $?.exitstatus != 0
+    STDERR.puts "#{__FILE__}: Terminated"
+    exit(1)
+  end
+
+  return pfams
+end
+
+def remove_overlaps(pfams)
+  overlapped_domains = 0
+  pfams.each_pair do |key, val|
+    overlaps = []
+  
+    sorted_by_start = val.sort{|l,r| l[1].first <=> r[1].first}
+
+    prev = sorted_by_start[0]
+    sorted_by_start[1..-1].each do |dom|
+      if prev[1].include? dom[1].first
+        overlaps.push dom
+      else
+        prev = dom
+      end
+    end
+  
+    #puts "OVERLAPS: #{overlaps.inspect}" unless overlaps.empty?
+  
+    overlaps.each {|o| overlapped_domains += 1; val.delete o}
+  end
+end
+
+def load_genes_without_pfams(fastafile, pfams)
+  []
+end
+
+def cluster(pfams, fastafile)
+
+  def get_ids(fastafile)
+    ids = []
+    File.open(fastafile) do |f|
+      while line = f.gets
+        if line =~ />(.*?)( |\Z)/
+          id = $1
+          ids.push id
+        end
+      end
+    end
+    return ids
+  end
+
+  ids = get_ids(fastafile)
+  domains = 0
+  clusters = {}
+
+  pfams.each_pair do |key, val|
+    next unless ids.include? key
+
+    domains += val.size
+  
+    new_key = val.collect{|v| v[0]}
+    clusters[new_key] ||= []
+    clusters[new_key].push key
+  end
+
+  return clusters
+end
+
+
+
+FASTA_FILES, PFAM_FILE = load_parameters()
+PFAMS = load_genes_with_pfams(PFAM_FILE)
+
+if PFAMS == {}
+  STDERR.puts "#{__FILE__}: WARNING: Nothing read from #{PFAM_FILE.inspect}"
+end
+
+
+remove_overlaps(PFAMS)
+
+
+FASTA_FILES.each do |fastafile|
+  clusters = cluster(PFAMS, fastafile)
+
+  pfamless = load_genes_without_pfams(fastafile, PFAMS)
+  clusters.push(pfamless) if !pfamless.empty?
+
+  clusters_s = clusters.sort {|l, r| -(l[1].size <=> r[1].size)}
+  id_files = []
+
+  clusters_s.each_with_index do |c, i|
+    cluster_key = c[0]
+    cluster_members = c[1]
+
+    id_file =
+      "#{fastafile.sub(/[.]?fasta$/,'')}_cluster#{i.to_s.rjust(2, '0')}_ids"
+
+    id_files.push id_file
+    File.open(id_file, 'w') do |f|
+      cluster_members.each {|m| f.puts m}
+    end
+  end
+
+  if id_files.empty?
+    STDERR.puts "#{SRC_NAME}: WARNING: No clusters found for #{fastafile}"
+  else
+    `#{IDS_TO_FASTA} #{fastafile} #{id_files.join(' ')}`
+  end
+end
+
+
